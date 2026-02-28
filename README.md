@@ -15,6 +15,6 @@ Groups are also replicated together with their rule tree's branches, by means of
 ### Links:
 [Vendor's website](https://www.rudder.io/)
 
-[WIKI](https://en.wikipedia.org/wiki/Rudder_(software\))
+[WIKI](https://en.wikipedia.org/wiki/Rudder_(software))
 
 [Rudder API reference](https://docs.rudder.io/api/v/21/)

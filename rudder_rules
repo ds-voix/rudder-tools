@@ -1,0 +1,559 @@
+#!/usr/bin/python3
+
+import argparse
+import json
+import os
+import re
+import sys
+
+sys.path.append("%s/%s" % (os.path.dirname(__file__), "common"))
+from colors import *
+
+RUDDER=''
+DST_RUDDER=''
+SRC=''
+DST= ''
+GROUP=''
+# Retry unsuccessful attempts
+HTTP_TIMEOUT = 5
+API = None
+
+from json_api import *
+from rudder import *
+
+exe = os.path.basename(__file__)
+
+import argparse
+parser = argparse.ArgumentParser(add_help=False, description=(f"""Rudder (SrcHost >> DstHost) rule transmission and management via the REST API.
+Call {sb}{exe}{s_} whit no arguments to show the usage hint."""))
+parser.add_argument('-?', '--help', action='help')#, help='show this help message and exit')
+#  parser.print_help()
+parser.add_argument('-h', '--src-host', dest='SrcHost', required=False, default='', help='Source Rudder server')
+parser.add_argument('-H', '--dst-host', dest='DstHost', required=False, help='Destination Rudder server')
+# Bad way. Use ACL + ProxyPreserveHost + "RequestHeader set X-API-Token"
+#parser.add_argument('-k', '--src-key', dest='SrcKey', required=False, default='', help='Source server API key')
+#parser.add_argument('-K', '--dst-key', dest='DstKey', required=False, help='Destination server API key')
+parser.add_argument('-d', '--delete', dest='DeleteId', required=False, default='', help='Rule id to be deleted, together with it\'s directives')
+parser.add_argument('-i', '--srcinfo', dest='SrcInfoPath', required=False, default='', help='Slash-separated "Path/to/Source/rule name": find and show UUID')
+parser.add_argument('-I', '--dstinfo', dest='DstInfoPath', required=False, default='', help='Slash-separated "Path/to/Target/rule name" (if You want to rename/delete it)')
+# Use "rudder_groups"
+#parser.add_argument('-ig', '--srcgroup', dest='SrcInfoGroup', required=False, default='', help='Slash-separated "Path/to/Source/group name": find and show group UUID and it\'s rules')
+#parser.add_argument('-IG', '--dstgroup', dest='DstInfoGroup', required=False, default='', help='Slash-separated "Path/to/Target/group name": find and show group UUID and it\'s rules')
+# Too complex in real usage
+#parser.add_argument('-m', '--move-from', dest='SourceRuleId', required=False, default='', help='Move group FROM this rule')
+#parser.add_argument('-M', '--move-to', dest='DestinationRuleId', required=False, default='', help='Move group TO this rule')
+parser.add_argument('-o', '--orphan', dest='FindOrphanDirectives', action='store_true', required=False, default=False, help='Find "orphans" (directives that are not applied in rules)')
+parser.add_argument('-r', '--rename', dest='RenameId', required=False, default='', help='Rule id to be renamed with Prefix, together with it\'s directives')
+parser.add_argument('-s', '--send', dest='SendId', required=False, default='', help='Rule id to be transferred from SrcHost, together with it\'s directives')
+# Too complex in real usage
+#parser.add_argument('-t', '--target-path', dest='TargetPath', required=False, default='', help='Slash-separated "Path/to/target/rule name", default is source path')
+parser.add_argument('-g', '--group', dest='MoveGroups', required=False, default='', help='Comma-separated *INCLUDE* group IDs to be moved from old to new rule. Use \"*\" to move ALL groups')
+parser.add_argument('-G', '--xgroup', dest='CopyExcludeGroups', required=False, default='', help='Comma-separated *EXCLUDE* group IDs to be *COPIED* from old to new rule. Use \"*\" to copy ALL groups')
+parser.add_argument('-p', '--prefix', dest='Prefix', required=False, default='#old ', help='Rename rule adding this Prefix , together with it\'s directives. Default="#old "')
+
+ARGS = parser.parse_args()
+
+def usage():
+  print(f"""{cm}  Usage:{c_}
+{sb}{exe}{s_} {sb}-h{s_} <src_rudder.url> {sb}-H{s_} <dst_rudder.url> {sb}-i{s_} <"Path/to/rule to be replicated"> {sb}-r{s_} '*' {sb}-s{s_} '*' {sb}-g{s_} '*' {sb}-G{s_} '*' {sb}-d{s_} '*'
+ This does all steps in rule replication. If this is a new rule at dst_rudder, call "rudder_grous" afterwards.
+
+{sb}{exe}{s_} {sb}-H{s_} <dst_rudder.url> {sb}-o{s_} {sb}-d{s_} '*'
+ This lists (and then clears) all "orphaned" directives (those who have no one rule).
+ You can also use "-d <prefix>" to delete only those orphans than has this prefix in name.
+
+{sb}{exe}{s_} {sb}-H{s_} <dst_rudder.url> {sb}-I{s_} <"Path/to/rule to be deleted"> {sb}-d{s_} '*'
+ This will delete the rule together with it's directives.
+ Both rule and all of it's direcives must be prefixed ("#old " is a default prefix).
+
+{sb}{exe}{s_} {sb}-?{s_}
+  Show the help about all arguments.""")
+  sys.exit(0)
+
+
+if not (ARGS.SrcHost or ARGS.DstHost):
+  usage()
+
+
+def update_technique(name, version):
+  if name == "aptPackageManagerSettings":
+    return "3.2"
+  elif name == "checkGenericFileContent":
+    return "8.0"
+  elif name == "copyGitFile":
+    return "2.3"
+  elif name == "cronManagement":
+    return "3.2"
+  elif name == "dnsConfiguration":
+    return "3.0"
+  elif name == "downloadFile":
+    return "4.0"
+  elif name == "fileAlterationMonitoring":
+    return "2.2"
+  elif name == "fileManagement":
+    return "4.1"
+  elif name == "filesPermissions":
+    return "2.2"
+  elif name == "groupManagement":
+    return "5.1"
+  elif name == "hostsConfiguration":
+    return "2.0"
+  elif name == "jobScheduler":
+    return "3.0"
+  elif name == "manageKeyValueFile":
+    return "1.3"
+  elif name == "motdConfiguration":
+    return "3.3"
+  elif name == "packageManagement":
+    return "1.3"
+  elif name == "partitionSizeMonitoring":
+    return "3.1"
+# Deep differences in v2.0. I don't know how to deal with rabbit.
+#  elif name == "rabbitmqPlugins":
+#    return "2.0"
+#  elif name == "rabbitmqUsers":
+#    return "2.0"
+  elif name == "repoGpgKeyManagement":
+    return "1.1"
+  elif name == "services":
+    return "1.1"
+  elif name == "servicesManagement":
+    return "3.0"
+  elif name == "sshConfiguration":
+    return "5.0"
+  elif name == "sshKeyDistribution":
+    return "4.0"
+  elif name == "sudoParameters":
+    return "3.2"
+  elif name == "userManagement":
+    return "10"
+  else:
+    return version
+
+
+# Pick categories and the rule from tree, accordong to full path in "RULE" string
+def rule_from_path(RULE, rules):
+  RC=[] # Array of dictionaries
+
+  if len(RULE) == 1: # "rootRuleCategory"
+    cat = rules["data"]["ruleCategories"]
+    rule = rules["data"]["ruleCategories"]["rules"]
+    rr = rudder_rules(rule, RULE[0])
+    r = RULE[0]
+    print(f"(%s): {r}" % cat["id"])
+  else:
+    cat = rules["data"]["ruleCategories"]
+    for i, r in enumerate(RULE):
+      if i < len(RULE) - 1:
+        cat = rudder_categories(cat["categories"], r)
+        if cat:
+          print("o %s" % r)
+          RC.append({"parent": cat["parent"],
+                     "id": cat["id"], #  Default: "{autogenerated}"
+                     "name": cat["name"],
+                     "description": cat["description"]})
+        else:
+          print("- %s" % r)
+          return None, RC
+      else:
+        rule = cat["rules"]
+        rr = rudder_rules(rule, RULE[len(RULE) - 1])
+
+  if rr:
+    print("o %s " % r)
+  else:
+    print("- %s " % r)
+  return rr, RC
+
+# Rename rule and it's directives using prefix
+def rule_rename(RR, directives):
+  renamed = {}
+  for d in RR["directives"]:
+    dd = directive_by_id(directives, d)
+    if not dd:
+      print(f"{cr}{rudder} (rule_rename):{c_} Directive with id={id} not found")
+      return None
+
+    new_name = dd['displayName']
+    if ARGS.Prefix != "":
+      if new_name.find(ARGS.Prefix) == 0:
+        continue
+      new_name = ARGS.Prefix + dd['displayName']
+    else: # Try to drop the default prefix
+      prefix = "#old "
+      while new_name.find(prefix) == 0:
+        new_name = new_name[len(prefix):]
+
+    if dd['displayName'] != new_name:
+      renamed[dd['displayName']] = new_name
+      dd['displayName'] = new_name
+      # POST the update
+      ok, res = retry(API.put_json, "/directives/%s" % d, dd, 'POST')
+      if not ok:
+        print(f"- {new_name}")
+        return None
+
+      print(f"+ {new_name}")
+
+  # Now, rename the rule
+  new_name = RR['displayName']
+  if ARGS.Prefix != "":
+    if new_name.find(ARGS.Prefix) < 0:
+      new_name = ARGS.Prefix + RR['displayName']
+  else: # Try to drop the default prefix
+    prefix = "#old "
+    while new_name.find(prefix) == 0:
+      new_name = new_name[len(prefix):]
+
+  if RR['displayName'] != new_name:
+#    renamed[dd['displayName']] = new_name
+    RR['displayName'] = new_name
+    # POST the update
+    ok, res = retry(API.put_json, "/rules/%s" % RR['id'], RR, 'POST')
+    if not ok:
+      return None
+
+    print(f"+ RULE {new_name}")
+
+  return renamed
+
+
+# Delete rule and it's directives
+def rule_delete(RR, directives):
+  if ARGS.Prefix == "":
+    return None
+
+  for d in RR["directives"]:
+    dd = directive_by_id(directives, d)
+    if not dd:
+      print(f"{cr}(rule_delete):{c_} Directive with id={d} not found")
+      return None
+
+    if dd['displayName'].find(ARGS.Prefix) < 0:
+      print(f"{cr}(rule_delete):{c_} Directive with id={d} has no prefix! Abort deletion")
+      return None
+
+  if RR['displayName'].find(ARGS.Prefix) < 0:
+    print(f"{cr}(rule_delete):{c_} Rule to be deleted has no prefix! Abort deletion")
+    return None
+
+  for d in RR["directives"]:
+    dd = directive_by_id(directives, d)
+    ok, res = retry(API.delete, "/directives/%s" % d)
+    if not ok:
+      return None
+    else:
+      print(f"+ {dd['displayName']}")
+
+  ok, res = retry(API.delete, "/rules/%s" % RR['id'])
+  if not ok:
+    return None
+  else:
+    print(f"+ RULE \"{RR['displayName']}\"")
+
+
+# Copy "targets" from old to new
+def transfer_rule_groups(RR_old, RR_new):
+  # Pre-fill targets
+#  RR_new['targets'].append({'include': {'or': []}})
+#  RR_new['targets'].append({'exclude': {'or': []}})
+
+  if ARGS.CopyExcludeGroups == '*':
+    RR_new["targets"][0]["include"]["or"] = RR_old["targets"][0]["include"]["or"]
+  elif ARGS.CopyExcludeGroups != '':
+    groups = CopyExcludeGroups.split(',')
+    for g in groups:
+      if g in RR_old["targets"][0]["include"]["or"]:
+        RR_new["targets"][0]["include"]["or"].append(g)
+
+  if ARGS.MoveGroups == '*':
+    RR_new["targets"][0]["exclude"]["or"] = RR_old["targets"][0]["exclude"]["or"]
+  elif ARGS.MoveGroups != '':
+    groups = MoveGroups.split(',')
+    for g in groups:
+      if g in RR_old["targets"][0]["exclude"]["or"]:
+        RR_new["targets"][0]["exclude"]["or"].append(g)
+
+  return RR_new
+
+
+def main():
+  RC=[] # Array of dictionaries
+  RR={} # Rule object
+  SRC_DICT = {} # By id
+  DST_DICT = {} # By name
+  OLD_RULE = "" # The old rule UUID, to be deleted
+  dst_rule_list = None
+
+  if RUDDER:
+    ok, rules = retry(API.get_json, "/rules/tree")
+    if not ok:
+      return 1
+
+    ok, directives = retry(API.get_json, "/directives")
+    if not ok:
+      return 1
+    directives = directives["data"]["directives"]
+
+    SRC_DICT = directives_dict_by_id(directives)
+    print(f"{sb}{RUDDER}:{s_} done loading (rules & directives) collection")
+
+    if ARGS.SrcInfoPath:
+      RULE = ARGS.SrcInfoPath.split("/")
+      rr, RC = rule_from_path(RULE, rules)
+
+    if rr:
+      print("UUID: %s" % rr['id'])
+      RR = rr
+      del RR['id'] # Generate UUID on replication
+#      del RR['targets'] # Call rudder_groups after the rule replication
+      RR["targets"][0]["include"]["or"] = []
+      RR["targets"][0]["exclude"]["or"] = []
+#      RR = {"category": cat["id"],
+#            "id": rr["id"], #  Default: "{autogenerated}"
+#            "displayName": rr["displayName"],
+#            "shortDescription": rr["shortDescription"],
+#            "longDescription": rr["longDescription"],
+#            "enabled": rr["enabled"]}
+    else:
+      print("- %s" % r)
+      return 1
+
+
+
+  if DST_RUDDER:
+    ok, dst_rules = retry(API.get_json, "/rules/tree", DST)
+    if not ok:
+      return 1
+
+    ok, dst_directives = retry(API.get_json, "/directives", DST)
+    if not ok:
+      return 1
+
+    dst_directives = dst_directives["data"]["directives"]
+    DST_DICT = directives_dict_by_name(dst_directives)
+    print(f"{sb}{DST_RUDDER}:{s_} done loading (rules & directives) collection")
+
+    if ARGS.FindOrphanDirectives:
+      if not dst_rule_list:
+        ok, dst_rule_list = retry(API.get_json, "/rules", DST)
+        if not ok:
+          return 1
+      rules = dst_rule_list["data"]["rules"]
+      DICT = {}
+      for r in rules:
+        for rd in r["directives"]:
+          DICT[rd] = None
+
+      print(f"{sb}{DST_RUDDER}:{s_} Orphans:")
+      for d in dst_directives:
+        if not d["id"] in DICT:
+          if not ARGS.DeleteId: # Just list
+            print("- %s >> %s" % (d["id"], d["displayName"]))
+          elif ARGS.DeleteId != "*": # Delete orphans by prefix
+            if d["displayName"].find(ARGS.DeleteId) != 0:
+              continue
+            ok, res = retry(API.delete, "/directives/%s" % d["id"])
+            if not ok:
+              print("- %s >> %s" % (d["id"], d["displayName"]))
+              return 1
+            else:
+              print("+ %s >> %s" % (d["id"], d["displayName"]))
+
+          else: # Delete all orphans
+            ok, res = retry(API.delete, "/directives/%s" % d["id"])
+            if not ok:
+              print("- %s >> %s" % (d["id"], d["displayName"]))
+              return 1
+            else:
+              print("+ %s >> %s" % (d["id"], d["displayName"]))
+
+      return 0
+
+
+    if ARGS.RenameId:
+      print(f"{sb}{DST_RUDDER}:{s_} Renaming rule with it's directives, prefix=\"{ARGS.Prefix}\"")
+      rr, _ = rule_from_path(RULE, dst_rules)
+
+      if rr:
+        renamed = rule_rename(rr, dst_directives)
+        if renamed is None:
+          print("Rename failed")
+          return 1
+        OLD_RULE = rr['id']
+        for old, new in renamed.items():
+          DST_DICT[new] = DST_DICT[old]
+          del DST_DICT[old]
+      else:
+        ARGS.DeleteId = ''
+        print(f"{sd}{DST_RUDDER}:{s_} Rule to be renamed was not found at the provided path. Skipping deletion as well...")
+
+
+    if ARGS.SendId:
+      ### Replica to DST ###
+      dup = [] # There must not been the same directive names on the target
+      DIRECTIVES = []
+      for d in RR["directives"]:
+        if SRC_DICT[d] in DST_DICT:
+          dup.append(SRC_DICT[d])
+        else:
+          DIRECTIVES.append(SRC_DICT[d])
+      if dup:
+        print(f"{cr}{DST_RUDDER}:{c_} found directives with the same names:")
+#        print(type(dup))
+        for d in sorted(dup):
+          print(f" {d}")
+          return 1
+
+      cat = dst_rules["data"]["ruleCategories"]
+#      print(cat)
+      category = cat["id"]
+
+      for r in RC:
+        cat = rudder_categories(cat["categories"], r["name"])
+        if cat:
+          category = cat["id"]
+        else:
+          ok, res = retry(API.put_json, "/rules/categories", r)
+          if not ok:
+            return 1
+          if not "data" in res:
+            return 1
+          res = res["data"]
+          if not "ruleCategories" in res:
+            return 1
+          res = res["ruleCategories"]
+          if not "id" in res:
+            return 1
+          category = res["id"]
+          # cat is None
+          cat = {'id': category, 'name': r["name"], 'categories': []}
+
+      RR["category"] = category
+
+      # There must not been the same rule name on the target ruleset
+      if not dst_rule_list:
+        ok, dst_rule_list = retry(API.get_json, "/rules", DST)
+        if not ok:
+          return 1
+      dup, _ = rule_by_name(dst_rule_list["data"]["rules"], RR['displayName'])
+      if dup:
+        print(f"{cr}{DST_RUDDER}:{c_} found the rule with the same name:")
+        print(f" {dup} == \"%s\"" % RR['displayName'])
+        return 1
+
+      # Put new rule, together with it's directives
+      # New directive set
+      RR['directives'] = []
+      print(f"{sb}{DST_RUDDER}:{s_} Writing directives")
+      for name in DIRECTIVES:
+        d = directive_by_name(directives, name)
+        if d:
+          del d['id']
+          print(f"+ {name}")
+          d['techniqueVersion'] = update_technique(d['techniqueName'], d['techniqueVersion'])
+          ok, res = retry(API.put_json, "/directives", d)
+          if not ok:
+            return 1
+          if not "data" in res:
+            return 1
+          res = res["data"]["directives"][0]
+#          print(res['id'])
+          RR['directives'].append(res['id'])
+        else:
+          print("WTF!? Directive \"{name}\" not found!")
+          return 1
+
+      # New rule
+      RR_old = None
+      if ARGS.RenameId and (ARGS.MoveGroups or ARGS.CopyExcludeGroups):
+        if OLD_RULE:
+          print(f"{sb}{DST_RUDDER}:{s_} Transferring groups")
+          RR_old = rule_by_id(dst_rule_list["data"]["rules"], OLD_RULE)
+          RR = transfer_rule_groups(RR_old, RR)
+
+      ok, res = retry(API.put_json, "/rules", RR)
+      if not ok:
+        return 1
+      if not "data" in res:
+        return 1
+      print(f"+ RULE {RR['displayName']}")
+
+      if RR_old:
+        print(f"{sb}{DST_RUDDER}:{s_} Desactivating the old rule")
+        RR_old["targets"][0]["include"]["or"] = []
+        RR_old["targets"][0]["exclude"]["or"] = []
+        ok, res = retry(API.put_json, "/rules/%s" % RR_old["id"], RR_old, 'POST')
+        if not ok:
+          return 1
+        if not "data" in res:
+          return 1
+        print(f"+ RULE {RR_old['displayName']}")
+
+
+    if ARGS.DeleteId:
+      rr = None
+      if not ARGS.Prefix:
+        print(f"{cr}{DST_RUDDER}:{c_} deleting of rules with an empty prefix is denied!")
+        return 1
+
+      if ARGS.DeleteId == '*':
+        if OLD_RULE == "":
+          if ARGS.DstInfoPath:
+            RULE = ARGS.DstInfoPath.split("/")
+            RULE[len(RULE)-1] = ARGS.Prefix + RULE[len(RULE)-1]
+            rr, _ = rule_from_path(RULE, dst_rules)
+          else:
+            print(f"{cr}{DST_RUDDER}:{c_} Provide the path to destination rule to be deleted")
+            return 1
+      else:
+        if OLD_RULE == "":
+          OLD_RULE = ARGS.DeleteId
+
+      if not rr:
+        if not dst_rule_list:
+          ok, dst_rule_list = retry(API.get_json, "/rules", DST)
+          if not ok:
+            return 1
+        rr = rule_by_id(dst_rule_list["data"]["rules"], OLD_RULE)
+
+      if rr:
+        print(f"{sb}{DST_RUDDER}:{s_} Deleting (prefixed) rule \"{rr['id']}\" with it's directives, if all of them have prefix=\"{ARGS.Prefix}\"")
+        rule_delete(rr, dst_directives)
+      else:
+        print(f"{cr}{DST_RUDDER}:{c_} (Prefixed) rule to be deleted was not found")
+        return 1
+
+
+if __name__ == '__main__':
+  RUDDER = ARGS.SrcHost
+  SRC = 'https://%s:8443/rudder/api/latest' % RUDDER
+
+  DST_RUDDER = ARGS.DstHost
+  DST = 'https://%s:8443/rudder/api/latest' % DST_RUDDER
+
+  API = JSON_API(SRC, DST, HTTP_TIMEOUT)
+
+###################### Exclusive running ######################
+  import fcntl
+  lock_file = "/var/lock/rudder_rules.%s--%s" % (RUDDER, DST_RUDDER)
+  locked = 0
+  try:
+    # Not so strong, as file can be removed outside of process
+    lck = open(lock_file, 'w')
+    # But, better then nothing
+    fcntl.lockf(lck, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    locked = 1
+    sys.exit( main() )
+
+  except EnvironmentError as err:
+    if lck is not None:
+      print(f"Another instance is running! Lock found on \"{lock_file}\"")
+      sys.exit(1)
+    else:
+      raise
+
+  finally:
+    if locked > 0:
+      os.remove(lock_file)
+###############################################################

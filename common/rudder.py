@@ -24,6 +24,9 @@ def rule_group(rule, group):
     return None
 
   rule = rule[0]
+#  print(group, rule)
+  if rule == "special:all":
+    return None
   if group in rule["include"]["or"]:
     return "include"
   elif group in rule["exclude"]["or"]:
@@ -61,7 +64,7 @@ def rule_by_id(rules, id):
   return None
 
 
-# O(n^2), but "n" is small 
+# O(n^2), but "n" is small
 def directive_by_name(directives, name):
   for d in directives:
     if d["displayName"] == name:
@@ -69,7 +72,7 @@ def directive_by_name(directives, name):
   return None
 
 
-# O(n^2), but "n" is small 
+# O(n^2), but "n" is small
 def directive_by_id(directives, id):
   for d in directives:
     if d["id"] == id:

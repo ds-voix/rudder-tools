@@ -113,6 +113,8 @@ def main():
           "enabled": gr["enabled"]}
 ### Newer rudders ###
 #              "properties":  gr["properties"]}
+    if "properties" in gr:
+      GR["properties"] = gr["properties"]
   else:
     print("- %s" % g)
     sys.exit(1)
@@ -125,6 +127,7 @@ def main():
 
   for g in GC:
     cat = rudder_categories(cat["categories"], g["name"])
+#    print(cat)
     if cat:
       category = cat["id"]
     else:
@@ -140,9 +143,11 @@ def main():
       if not "id" in res:
         sys.exit(1)
       category = res["id"]
+      cat = res
 
   GR["category"] = category
 
+  #!!! TypeError: 'NoneType' object is not subscriptable
   group = cat["groups"]
   gr = rudder_groups(group, GROUP[len(GROUP) - 1])
   if gr:
@@ -152,9 +157,18 @@ def main():
       sys.exit(1)
   else:
     # PUT new
+    original_name = GR["displayName"]
+    if len(GR["displayName"]) < 4: # Bug in API v.21
+      while (len(GR["displayName"]) < 4):
+        GR["displayName"] += "+"
     ok, res = retry(API.put_json, "/groups", GR)
     if not ok:
       sys.exit(1)
+    if original_name != GR["displayName"]: # Rename to shortest name is ok in API v.21
+      GR["displayName"] = original_name
+      ok, res = retry(API.put_json, "/groups/%s" % res["id"], GR, 'POST')
+      if not ok:
+        sys.exit(1)
 
     gr = {}
     gr["id"] = GR["id"]

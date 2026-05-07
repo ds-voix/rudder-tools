@@ -1,0 +1,139 @@
+#!/usr/bin/python3
+
+import argparse
+import json
+import os
+import re
+import sys
+#import time
+
+sys.path.append("%s/%s" % (os.path.dirname(__file__), "common"))
+from colors import *
+
+RUDDER=''
+DST_RUDDER=''
+SRC=''
+DST= ''
+PARAMETER=''
+# Retry unsuccessful attempts
+HTTP_TIMEOUT = 5
+API = None
+
+from json_api import *
+from rudder import *
+
+
+def usage():
+  exe = os.path.basename(__file__)
+  print(f"""{cm}  Usage:{c_} {sb}{exe}{s_} <src_rudder.url> <"Parameter to be replicated"> <dst_rudder.url>
+
+{sb}{exe}{s_} <src_rudder.url> -- List all parameters""")
+  sys.exit(0)
+
+
+def list_parameters():
+  ok, parameters = retry(API.get_json, "/parameters")
+  if not ok:
+    sys.exit(1)
+
+#  print_parameters(parameters["data"]["parameters"], '')
+  for p in parameters["data"]["parameters"]:
+    print(f"{p['id']} = \"{p['value']}\"")
+
+  sys.exit(0)
+
+
+
+def main():
+  ok, parameters = retry(API.get_json, f"/parameters")
+  if not ok:
+    print(f"")
+    sys.exit(1)
+
+  param = ""
+  for p in parameters["data"]["parameters"]:
+    if p["id"] == PARAMETER:
+      param = p
+      break
+  if param == "":
+    print(f"{cr}Parameter not found:{c_} \"{PARAMETER}\"")
+    sys.exit(1)
+
+  ok, dst_parameters = retry(API.get_json, "/parameters", DST)
+  if not ok:
+    sys.exit(1)
+
+  post = False
+  for p in dst_parameters["data"]["parameters"]:
+    if p["id"] == PARAMETER:
+      post = True
+      break
+
+  if post:
+    # POST the update
+    ok, res = retry(API.put_json, "/parameters/%s" % param["id"], param, 'POST')
+    if not ok:
+      sys.exit(1)
+  else:
+    # PUT new
+    original_name = param["id"]
+    if len(param["id"]) < 4: # Bug in API v.21
+      while (len(param["id"]) < 4):
+        param["id"] += "+"
+    ok, res = retry(API.put_json, "/parameters", param)
+    if not ok:
+      sys.exit(1)
+    if original_name != param["id"]: # Rename to shortest name is ok in API v.21
+      param["id"] = original_name
+      ok, res = retry(API.put_json, "/parameters/%s" % param["id"], param, 'POST')
+      if not ok:
+        sys.exit(1)
+
+  print(f"{cg}{PARAMETER} :: OK{c_}")
+
+
+if __name__ == '__main__':
+  if len(sys.argv) == 1:
+    usage()
+
+  RUDDER = sys.argv[1]
+  SRC = 'https://%s:8443/rudder/api/latest' % RUDDER
+  if len(sys.argv) == 2:
+    API = JSON_API(SRC, None, HTTP_TIMEOUT)
+    list_parameters()
+
+  if len(sys.argv) == 3:
+    usage()
+
+  PARAMETER = sys.argv[2]
+  if len(sys.argv) < 4:
+    usage()
+
+  DST_RUDDER = sys.argv[3]
+  DST = 'https://%s:8443/rudder/api/latest' % DST_RUDDER
+
+  API = JSON_API(SRC, DST, HTTP_TIMEOUT)
+
+###################### Exclusive running ######################
+  import fcntl
+  lock_file = "/var/lock/rudder_groups.%s--%s" % (RUDDER, DST_RUDDER)
+  locked = 0
+  try:
+    # Not so strong, as file can be removed outside of process
+    lck = open(lock_file, 'w')
+    # But, better then nothing
+    fcntl.lockf(lck, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    locked = 1
+    main()
+
+  except EnvironmentError as err:
+    if lck is not None:
+      print(f"Another instance is running! Lock found on \"{lock_file}\"")
+      sys.exit(1)
+    else:
+      raise
+
+  finally:
+    if locked > 0:
+      os.remove(lock_file)
+###############################################################

@@ -131,6 +131,10 @@ def main():
     if cat:
       category = cat["id"]
     else:
+      original_name = g["name"]
+      if len(g["name"]) < 4: # Bug in API v.21
+        while (len(g["name"]) < 4):
+          g["name"] += "+"
       ok, res = retry(API.put_json, "/groups/categories", g)
       if not ok:
         sys.exit(1)
@@ -144,6 +148,12 @@ def main():
         sys.exit(1)
       category = res["id"]
       cat = res
+
+      if original_name != g["name"]: # Rename to shortest name is ok in API v.21
+        g["name"] = original_name
+        ok, res = retry(API.put_json, "/groups/categories/%s" % res["id"], g, 'POST')
+        if not ok:
+          sys.exit(1)
 
   GR["category"] = category
 
